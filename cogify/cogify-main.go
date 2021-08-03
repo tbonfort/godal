@@ -1,0 +1,151 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"os"
+	"strings"
+
+	"cloud.google.com/go/storage"
+	"github.com/airbusgeo/cogger"
+	"github.com/airbusgeo/godal"
+	"github.com/airbusgeo/osio"
+)
+
+func usage() {
+	fmt.Printf("usage: %s infile [-out outfile.tif] [OPT=VAL]...", os.Args[0])
+	os.Exit(1)
+}
+
+func gsparse(file string) (bucket, object string) {
+	if !strings.HasPrefix(file, "gs://") {
+		return
+	}
+	file = file[5:]
+	firstSlash := strings.Index(file, "/")
+	if firstSlash == -1 {
+		return
+	}
+	obj := strings.Trim(file[firstSlash:], "/")
+	if obj == "" {
+		return
+	}
+	bucket = file[0:firstSlash]
+	object = obj
+	return
+}
+
+var blockSize = flag.String("gs.blocksize", "512k", "osio gs block size")
+var numCachedBlocks = flag.Int("gs.numblocks", 512, "osio number of cached blocks")
+var tmpdir = flag.String("tmpdir", ".", "temporary directory for intermediate file")
+var overviews = flag.Bool("ovr", true, "compute overviews")
+
+func main() {
+	outfile := flag.String("out", "cog.tif", "output file (can be gs://)")
+	flag.Parse()
+	if len(flag.Args()) == 0 {
+		usage()
+	}
+	infile := flag.Arg(0)
+	options := flag.Args()[1:]
+	ctx := context.Background()
+	err := run(ctx, infile, *outfile, options)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, infile, outfile string, options []string) error {
+	ib, _ := gsparse(infile)
+	ob, oo := gsparse(outfile)
+	var stcl *storage.Client
+	var err error
+	if ib != "" || ob != "" {
+		stcl, err = storage.NewClient(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to create gcs storage client: %w", err)
+		}
+		gs, err := osio.GCSHandle(ctx, osio.GCSClient(stcl))
+		if err != nil {
+			return fmt.Errorf("osio.gcshandle: %w", err)
+		}
+		gsa, err := osio.NewAdapter(gs, osio.BlockSize(*blockSize), osio.NumCachedBlocks(*numCachedBlocks))
+		if err != nil {
+			return fmt.Errorf("osio.newadapter: %w", err)
+		}
+		err = godal.RegisterVSIAdapter("gs://", gsa)
+		if err != nil {
+			return fmt.Errorf("godal.registervsi: %w", err)
+		}
+	}
+	godal.RegisterAll()
+	inds, err := godal.Open(infile, godal.RasterOnly())
+	if err != nil {
+		return fmt.Errorf("open %s: %w", infile, err)
+	}
+	if len(options) == 0 {
+		options = []string{
+			"-co", "BLOCKXSIZE=256",
+			"-co", "BLOCKYSIZE=256",
+			"-co", "COMPRESS=LZW",
+		}
+	}
+	options = append(options,
+		"-co", "TILED=YES",
+		"-co", "BIGTIFF=YES",
+		"-of", "GTiff",
+	)
+	tmpf, err := ioutil.TempFile(*tmpdir, "*.tif")
+	if err != nil {
+		return err
+	}
+	tmpf.Close()
+	tmpfname := tmpf.Name()
+	defer os.Remove(tmpfname)
+
+	outds, err := inds.Translate(tmpfname, options)
+	if err != nil {
+		return fmt.Errorf("translate: %w", err)
+	}
+	if *overviews {
+		err = outds.BuildOverviews()
+		if err != nil {
+			return fmt.Errorf("build overviews: %w", err)
+		}
+	}
+	err = outds.Close()
+	if err != nil {
+		return fmt.Errorf("close temp tif: %w", err)
+	}
+
+	tmpf, err = os.Open(tmpfname)
+	if err != nil {
+		return fmt.Errorf("re-open temp tif %s: %w", tmpfname, err)
+	}
+	defer tmpf.Close()
+
+	var outr io.WriteCloser
+	if ob == "" {
+		outr, err = os.Create(outfile)
+		if err != nil {
+			return fmt.Errorf("create %s: %w", outfile, err)
+		}
+	} else {
+		outr = stcl.Bucket(ob).Object(oo).NewWriter(ctx)
+	}
+
+	err = cogger.Rewrite(outr, tmpf)
+	if err != nil {
+		return fmt.Errorf("cogger.rewrite: %w", err)
+	}
+
+	err = outr.Close()
+	if err != nil {
+		return fmt.Errorf("close %s: %w", outfile, err)
+	}
+	return nil
+}
