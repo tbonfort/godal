@@ -2221,6 +2221,18 @@ func (sr *SpatialRef) SemiMinor() (float64, error) {
 	return float64(sm), nil
 }
 
+// Units returns the SpatialRef's Unit name and scaling factor to meters
+func (sr *SpatialRef) LinearUnits() (string, float64) {
+	var cname *C.char
+	sm := C.OSRGetLinearUnits(sr.handle, &cname)
+
+	name := ""
+	if cname != nil {
+		name = C.GoString(cname)
+	}
+	return name, float64(sm)
+}
+
 // AttrValue Fetch indicated attribute of named node from within the WKT tree.
 func (sr *SpatialRef) AttrValue(name string, child int) (string, bool) {
 	cstr := C.CString(name)

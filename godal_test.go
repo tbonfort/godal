@@ -1669,6 +1669,9 @@ func TestProjMisc(t *testing.T) {
 	assert.Equal(t, "WGS 84", attr)
 	_, ok = sr.AttrValue("GEOGCS", 9999)
 	assert.False(t, ok)
+	units, factor := epsg4326.LinearUnits()
+	assert.Equal(t, "degrees", units)
+	assert.Equal(t, 0.005, factor)
 
 	err = sr.AutoIdentifyEPSG()
 	assert.NoError(t, err)
@@ -1689,6 +1692,9 @@ func TestProjMisc(t *testing.T) {
 	assert.Error(t, err)
 	_, err = l.SemiMinor()
 	assert.Error(t, err)
+	units, factor = l.LinearUnits()
+	assert.Equal(t, "m", units)
+	assert.Equal(t, 1, factor)
 
 	//TODO? Find a better way to mak WKT() error out
 	l = &SpatialRef{}
